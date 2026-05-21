@@ -68,7 +68,8 @@ export default function FooterBar({
 			<div className="flex flex-col gap-3 sm:col-span-2 xl:col-span-1">
 				{applyReport ? (
 					<p className="m-0 text-xs text-amber-100/70">
-						Applied {applyReport.appliedMods} mods, wrote{" "}
+						Applied {applyReport.appliedMods} mods, restored{" "}
+						{applyReport.filesRestored} files, wrote{" "}
 						{applyReport.filesWritten} files, removed{" "}
 						{applyReport.filesRemoved} files.
 					</p>

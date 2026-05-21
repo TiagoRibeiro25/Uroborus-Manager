@@ -22,6 +22,7 @@ export type UiState = {
 export type ApplyReport = {
 	appliedMods: number;
 	filesWritten: number;
+	filesRestored: number;
 	filesRemoved: number;
 };
 

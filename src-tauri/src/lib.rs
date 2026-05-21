@@ -52,6 +52,7 @@ struct UiState {
 struct ApplyReport {
     applied_mods: usize,
     files_written: usize,
+    files_restored: usize,
     files_removed: usize,
 }
 
@@ -60,6 +61,8 @@ struct ApplyReport {
 struct RemovedMod {
     id: String,
     files: Vec<String>,
+    #[serde(default)]
+    replaces: Vec<String>,
 }
 
 #[tauri::command]
@@ -196,10 +199,14 @@ fn remove_mod(app: AppHandle, id: String) -> Result<UiState, String> {
     let mods_dir = resolve_mods_dir(&app, &state)?;
     if let Some(index) = state.mods.iter().position(|entry| entry.id == id) {
         let removed = state.mods.remove(index);
-        state.pending_removals.push(RemovedMod {
-            id: removed.id,
-            files: removed.files,
-        });
+        // Already disabled + applied mods had their files restored; don't queue again.
+        if removed.enabled {
+            state.pending_removals.push(RemovedMod {
+                id: removed.id,
+                files: removed.files,
+                replaces: removed.replaces,
+            });
+        }
     }
     let mod_dir = mods_dir.join(&id);
     if mod_dir.exists() {
@@ -212,6 +219,8 @@ fn remove_mod(app: AppHandle, id: String) -> Result<UiState, String> {
 #[tauri::command]
 fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
     let mut state = load_state(&app)?;
+    refresh_replacements(&mut state)?;
+
     let game_path = state
         .game_path
         .clone()
@@ -223,8 +232,8 @@ fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
 
     let mods_dir = resolve_mods_dir(&app, &state)?;
     let backup_dir = resolve_backup_dir(&app, &state)?;
-    let originals_dir = backup_dir.join("originals");
-    fs::create_dir_all(&originals_dir).map_err(|err| err.to_string())?;
+    let backup_native = primary_backup_native(&backup_dir);
+    fs::create_dir_all(&backup_native).map_err(|err| err.to_string())?;
 
     let enabled_mods: Vec<ModEntry> = state
         .mods
@@ -233,32 +242,52 @@ fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
         .cloned()
         .collect();
 
-    let mut all_mod_files: HashSet<String> = HashSet::new();
+    // Files owned by disabled or removed mods only — not every file in the backup folder.
+    let mut inactive_files: HashSet<String> = HashSet::new();
     let mut enabled_files: HashSet<String> = HashSet::new();
     for entry in &state.mods {
-        for file in &entry.files {
-            all_mod_files.insert(file.clone());
-        }
         if entry.enabled {
             for file in &entry.files {
                 enabled_files.insert(file.clone());
             }
+        } else {
+            for file in &entry.files {
+                inactive_files.insert(file.clone());
+            }
         }
     }
-
     for removed in &state.pending_removals {
         for file in &removed.files {
-            all_mod_files.insert(file.clone());
+            inactive_files.insert(file.clone());
         }
     }
 
+    let native_pc = game_dir.join("nativePC_MT");
+
+    let mut files_restored = 0usize;
     let mut files_removed = 0usize;
-    for rel in &all_mod_files {
-        let game_file = game_dir.join("nativePC_MT").join(rel);
-        let backup_file = originals_dir.join("nativePC_MT").join(rel);
-        if backup_file.exists() {
-            copy_file(&backup_file, &game_file)?;
-        } else if !enabled_files.contains(rel) && game_file.exists() {
+    for rel in &inactive_files {
+        // Another enabled mod still uses this path — keep the modded file and its backup.
+        if enabled_files.contains(rel) {
+            continue;
+        }
+        let game_file = join_rel(&native_pc, rel);
+        let expects_vanilla = inactive_file_expects_vanilla(&state, rel);
+
+        if let Some(backup_file) = find_backup_file(&backup_dir, rel) {
+            restore_file_from_backup(&backup_file, &game_file)?;
+            delete_backup_for_rel(&backup_dir, rel)?;
+            files_restored += 1;
+        } else if expects_vanilla {
+            if game_file.exists() {
+                // Backup was already restored (e.g. mod was disabled and applied earlier).
+                continue;
+            }
+            return Err(format!(
+                "Missing backup for \"{rel}\". Enable the mod(s) again, click Apply, then disable and Apply once more."
+            ));
+        } else if game_file.exists() {
+            // Mod-added file (was not in the game before the mod).
             fs::remove_file(&game_file).map_err(|err| err.to_string())?;
             files_removed += 1;
         }
@@ -268,12 +297,22 @@ fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
     for entry in &enabled_mods {
         let mod_root = mods_dir.join(&entry.id).join("nativePC_MT");
         for rel in &entry.files {
-            let mod_file = mod_root.join(rel);
-            let game_file = game_dir.join("nativePC_MT").join(rel);
-            let backup_file = originals_dir.join("nativePC_MT").join(rel);
+            let mod_file = join_rel(&mod_root, rel);
+            if !mod_file.is_file() {
+                return Err(format!("Mod file missing: {rel}"));
+            }
+            let game_file = join_rel(&native_pc, rel);
+            let backup_file = join_rel(&backup_native, rel);
 
-            if !backup_file.exists() && game_file.exists() {
-                copy_file(&game_file, &backup_file)?;
+            // Backup vanilla before the first mod overwrites this path.
+            if !backup_file.exists() {
+                if game_file.exists() {
+                    copy_file(&game_file, &backup_file)?;
+                } else if entry.replaces.contains(rel) {
+                    return Err(format!(
+                        "Game file missing for \"{rel}\". Verify your game path is correct."
+                    ));
+                }
             }
 
             copy_file(&mod_file, &game_file)?;
@@ -287,6 +326,7 @@ fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
     Ok(ApplyReport {
         applied_mods: enabled_mods.len(),
         files_written,
+        files_restored,
         files_removed,
     })
 }
@@ -496,13 +536,20 @@ fn list_mod_files(native_dir: &Path) -> Result<Vec<String>, String> {
     if !native_dir.exists() {
         return Err("nativePC_MT folder is missing after extraction.".to_string());
     }
+    list_files_in_tree(native_dir)
+}
+
+fn list_files_in_tree(root: &Path) -> Result<Vec<String>, String> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
 
     let mut files = Vec::new();
-    for entry in WalkDir::new(native_dir).into_iter().filter_map(Result::ok) {
+    for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
         if entry.file_type().is_file() {
             let rel = entry
                 .path()
-                .strip_prefix(native_dir)
+                .strip_prefix(root)
                 .map_err(|err| err.to_string())?;
             files.push(normalize_path(rel));
         }
@@ -510,8 +557,106 @@ fn list_mod_files(native_dir: &Path) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+fn primary_backup_native(backup_dir: &Path) -> PathBuf {
+    backup_dir.join("originals").join("nativePC_MT")
+}
+
+fn backup_roots(backup_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        primary_backup_native(backup_dir),
+        backup_dir.join("nativePC_MT"),
+        backup_dir.join("originals"),
+    ]
+}
+
+fn inactive_file_expects_vanilla(state: &AppState, rel: &str) -> bool {
+    for entry in &state.mods {
+        if entry.enabled {
+            continue;
+        }
+        if entry.files.iter().any(|file| file == rel) && entry.replaces.iter().any(|file| file == rel) {
+            return true;
+        }
+    }
+    for removed in &state.pending_removals {
+        if removed.files.iter().any(|file| file == rel)
+            && removed.replaces.iter().any(|file| file == rel)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn restore_file_from_backup(backup: &Path, game_file: &Path) -> Result<(), String> {
+    if let Some(parent) = game_file.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    if game_file.exists() {
+        fs::remove_file(game_file).map_err(|err| err.to_string())?;
+    }
+    match fs::rename(backup, game_file) {
+        Ok(()) => Ok(()),
+        Err(_) => {
+            copy_file(backup, game_file)?;
+            fs::remove_file(backup).map_err(|err| err.to_string())?;
+            Ok(())
+        }
+    }
+}
+
+fn find_backup_file(backup_dir: &Path, rel: &str) -> Option<PathBuf> {
+    for root in backup_roots(backup_dir) {
+        let candidate = join_rel(&root, rel);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn delete_backup_for_rel(backup_dir: &Path, rel: &str) -> Result<(), String> {
+    for root in backup_roots(backup_dir) {
+        let candidate = join_rel(&root, rel);
+        if candidate.is_file() {
+            fs::remove_file(&candidate).map_err(|err| err.to_string())?;
+            remove_empty_parents(&candidate, &root);
+        }
+    }
+    Ok(())
+}
+
+fn remove_empty_parents(file: &Path, root: &Path) {
+    let mut dir = file.parent();
+    while let Some(current) = dir {
+        if current == root {
+            break;
+        }
+        let is_empty = fs::read_dir(current)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if !is_empty {
+            break;
+        }
+        if fs::remove_dir(current).is_err() {
+            break;
+        }
+        dir = current.parent();
+    }
+}
+
 fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+fn join_rel(base: &Path, rel: &str) -> PathBuf {
+    rel.split(['/', '\\']).fold(base.to_path_buf(), |acc, part| {
+        if part.is_empty() || part == "." {
+            acc
+        } else {
+            acc.join(part)
+        }
+    })
 }
 
 fn compute_replacements(game_path: Option<&str>, files: &[String]) -> Result<Vec<String>, String> {
@@ -524,9 +669,10 @@ fn compute_replacements(game_path: Option<&str>, files: &[String]) -> Result<Vec
         return Ok(Vec::new());
     }
 
+    let native_pc = game_path.join("nativePC_MT");
     let mut replaces = Vec::new();
     for rel in files {
-        let candidate = game_path.join("nativePC_MT").join(rel);
+        let candidate = join_rel(&native_pc, rel);
         if candidate.exists() {
             replaces.push(rel.clone());
         }
