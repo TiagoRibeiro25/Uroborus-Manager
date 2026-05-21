@@ -1,0 +1,1 @@
+- Fix disabling not working, some files get deleted and not replaced by the backup.
