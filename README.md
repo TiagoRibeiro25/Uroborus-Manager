@@ -43,3 +43,6 @@ A mod manager for Resident Evil 5 (2009)
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+This project includes 7z.exe from 7-Zip.
+7-Zip is licensed separately under the GNU LGPL and other licenses.
