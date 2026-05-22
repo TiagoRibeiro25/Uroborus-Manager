@@ -1,5 +1,7 @@
 # Uroborus manager
 
+![App Screenshot](./images/Screenshot.png)
+
 ## Description
 
 A mod manager for Resident Evil 5 (2009)
