@@ -1,4 +1,4 @@
-import { ApplyReport } from "../types/mods";
+import { ApplyConflict, ApplyReport } from "../types/mods";
 
 type FooterBarProps = {
 	gamePath: string;
@@ -7,9 +7,13 @@ type FooterBarProps = {
 	busy: boolean;
 	pendingChanges: boolean;
 	gamePathValid: boolean;
+	hasApplyConflicts: boolean;
+	applyConflicts: ApplyConflict[];
 	applyReport: ApplyReport | null;
 	onPickModsPath: () => void;
 	onPickBackupPath: () => void;
+	onOpenGameFolder: () => void;
+	onOpenModsLibrary: () => void;
 	onApply: () => void;
 };
 
@@ -20,9 +24,13 @@ export default function FooterBar({
 	busy,
 	pendingChanges,
 	gamePathValid,
+	hasApplyConflicts,
+	applyConflicts,
 	applyReport,
 	onPickModsPath,
 	onPickBackupPath,
+	onOpenGameFolder,
+	onOpenModsLibrary,
 	onApply,
 }: FooterBarProps) {
 	return (
@@ -34,6 +42,13 @@ export default function FooterBar({
 				<span className="mt-2 block break-all text-sm text-amber-100/80">
 					{gamePath}
 				</span>
+				<button
+					className="mt-3 rounded-full border border-amber-300/30 px-4 py-2 text-[11px] uppercase tracking-[0.2em] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100 disabled:opacity-40"
+					onClick={onOpenGameFolder}
+					disabled={busy || !gamePathValid}
+				>
+					Open Game Folder
+				</button>
 			</div>
 			<div>
 				<p className="m-0 text-xs uppercase tracking-[0.2em] text-amber-100/60">
@@ -42,13 +57,22 @@ export default function FooterBar({
 				<span className="mt-2 block break-all text-sm text-amber-100/80">
 					{modsPath}
 				</span>
-				<button
-					className="mt-3 rounded-full border border-amber-300/30 px-4 py-2 text-[11px] uppercase tracking-[0.2em] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100"
-					onClick={onPickModsPath}
-					disabled={busy}
-				>
-					Change Mods Path
-				</button>
+				<div className="mt-3 flex flex-wrap gap-2">
+					<button
+						className="rounded-full border border-amber-300/30 px-4 py-2 text-[11px] uppercase tracking-[0.2em] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100"
+						onClick={onPickModsPath}
+						disabled={busy}
+					>
+						Change Mods Path
+					</button>
+					<button
+						className="rounded-full border border-amber-300/30 px-4 py-2 text-[11px] uppercase tracking-[0.2em] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100"
+						onClick={onOpenModsLibrary}
+						disabled={busy}
+					>
+						Open Library
+					</button>
+				</div>
 			</div>
 			<div>
 				<p className="m-0 text-xs uppercase tracking-[0.2em] text-amber-100/60">
@@ -66,7 +90,14 @@ export default function FooterBar({
 				</button>
 			</div>
 			<div className="flex flex-col gap-3 sm:col-span-2 xl:col-span-1">
-				{applyReport ? (
+				{hasApplyConflicts ? (
+					<p className="m-0 text-xs text-amber-200">
+						Apply blocked: {applyConflicts.length} overlapping file
+						{applyConflicts.length === 1 ? "" : "s"} between enabled mods.
+						Disable mods until each game file is owned by at most one enabled
+						mod.
+					</p>
+				) : applyReport ? (
 					<p className="m-0 text-xs text-amber-100/70">
 						Applied {applyReport.appliedMods} mods, restored{" "}
 						{applyReport.filesRestored} files, wrote{" "}
@@ -77,11 +108,16 @@ export default function FooterBar({
 					<p className="m-0 text-xs text-amber-100/70">Awaiting changes.</p>
 				)}
 				<button
-					className={`rounded-full bg-amber-300 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-900 transition hover:bg-amber-200 ${
-						pendingChanges ? "animate-pulse" : ""
+					className={`rounded-full bg-amber-300 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-900 transition hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-40 ${
+						pendingChanges && !hasApplyConflicts ? "animate-pulse" : ""
 					}`}
 					onClick={onApply}
-					disabled={busy || !gamePathValid}
+					disabled={busy || !gamePathValid || hasApplyConflicts}
+					title={
+						hasApplyConflicts
+							? "Resolve enabled-mod conflicts before applying"
+							: undefined
+					}
 				>
 					Apply Enabled Mods
 				</button>

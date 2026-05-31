@@ -40,9 +40,13 @@ A mod manager for Resident Evil 5 (2009)
     npm run tauri build
     ```
 
+### 7-Zip (Windows builds)
+
+Place the standalone `7z.exe` from [7-Zip Extra](https://www.7-zip.org/download.html) at `src-tauri/bin/7z.exe` before building for Windows. It is embedded into the executable at compile time, so portable copies do not need a separate `bin` folder next to the app.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-This project includes 7z.exe from 7-Zip.
+Windows builds embed `7z.exe` from 7-Zip Extra at compile time.
 7-Zip is licensed separately under the GNU LGPL and other licenses.

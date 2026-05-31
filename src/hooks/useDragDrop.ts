@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { isModArchivePath } from "../types/mods";
 
 type DragDropEvent =
 	| { type: "enter"; paths: string[]; position: { x: number; y: number } }
@@ -31,8 +32,9 @@ export function useDragDrop(onDrop: (paths: string[]) => void): boolean {
 						if (droppingRef.current) break;
 						droppingRef.current = true;
 						setDragActive(false);
-						if (event.payload.paths.length > 0) {
-							onDropRef.current(event.payload.paths);
+						const archives = event.payload.paths.filter(isModArchivePath);
+						if (archives.length > 0) {
+							onDropRef.current(archives);
 						}
 						break;
 					case "leave":

@@ -30,11 +30,22 @@ export default function App() {
 		removeMod,
 		applyMods,
 		importMods,
+		disableAllMods,
+		reorderMod,
+		openGameFolder,
+		openModsLibrary,
+		openModFolder,
+		launchGame,
+		applyConflicts,
+		hasApplyConflicts,
 	} = useModManager();
 
 	const dragActive = useDragDrop(importMods);
 	const gamePathValid = Boolean(state?.gamePathValid);
 	const showGamePathPrompt = Boolean(state && !state.gamePathValid);
+	const selectedModIndex = selectedId
+		? mods.findIndex((mod) => mod.id === selectedId)
+		: -1;
 
 	return (
 		<div className="relative min-h-screen overflow-hidden bg-zinc-950 font-['Spline_Sans'] text-amber-50">
@@ -49,6 +60,7 @@ export default function App() {
 					gamePathValid={gamePathValid}
 					busy={busy}
 					onPickGamePath={pickGamePath}
+					onLaunchGame={launchGame}
 				/>
 				<main className="grid gap-6 lg:grid-cols-[320px_1fr]">
 					<ModList
@@ -59,8 +71,16 @@ export default function App() {
 						onToggle={toggleMod}
 						onRemove={removeMod}
 						onAdd={pickMods}
+						onDisableAll={disableAllMods}
+						onReorder={reorderMod}
 					/>
-					<ModDetails mod={selectedMod} conflicts={selectedConflicts} />
+					<ModDetails
+						mod={selectedMod}
+						conflicts={selectedConflicts}
+						modIndex={selectedModIndex >= 0 ? selectedModIndex : 0}
+						modCount={mods.length}
+						onOpenModFolder={openModFolder}
+					/>
 				</main>
 				<FooterBar
 					gamePath={gamePathLabel}
@@ -69,9 +89,13 @@ export default function App() {
 					busy={busy}
 					pendingChanges={pendingChanges}
 					gamePathValid={gamePathValid}
+					hasApplyConflicts={hasApplyConflicts}
+					applyConflicts={applyConflicts}
 					applyReport={applyReport}
 					onPickModsPath={pickModsPath}
 					onPickBackupPath={pickBackupPath}
+					onOpenGameFolder={openGameFolder}
+					onOpenModsLibrary={openModsLibrary}
 					onApply={applyMods}
 				/>
 			</div>

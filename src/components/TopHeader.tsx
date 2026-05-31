@@ -2,12 +2,14 @@ type TopHeaderProps = {
 	gamePathValid: boolean;
 	busy: boolean;
 	onPickGamePath: () => void;
+	onLaunchGame: () => void;
 };
 
 export default function TopHeader({
 	gamePathValid,
 	busy,
 	onPickGamePath,
+	onLaunchGame,
 }: TopHeaderProps) {
 	return (
 		<header className="mb-6 flex flex-col gap-4 rounded-2xl border border-amber-400/20 bg-zinc-900/70 p-5 shadow-[0_16px_40px_rgba(0,0,0,0.45)] backdrop-blur-xl lg:flex-row lg:items-center lg:justify-between">
@@ -35,6 +37,13 @@ export default function TopHeader({
 					disabled={busy}
 				>
 					Select Game Folder
+				</button>
+				<button
+					className="rounded-full bg-amber-300 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-900 transition hover:bg-amber-200 disabled:opacity-40"
+					onClick={onLaunchGame}
+					disabled={busy || !gamePathValid}
+				>
+					Launch Game
 				</button>
 			</div>
 		</header>

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import {
+	ApplyConflict,
 	ApplyReport,
 	DEFAULT_GAME_PATH,
 	ModConflict,
@@ -19,6 +21,8 @@ export type ModManagerState = {
 	busy: boolean;
 	error: string | null;
 	applyReport: ApplyReport | null;
+	applyConflicts: ApplyConflict[];
+	hasApplyConflicts: boolean;
 	gamePathLabel: string;
 	modsPath: string;
 	backupPath: string;
@@ -31,6 +35,12 @@ export type ModManagerState = {
 	removeMod: (mod: ModInfo) => Promise<void>;
 	applyMods: () => Promise<void>;
 	importMods: (paths: string[]) => Promise<void>;
+	disableAllMods: () => Promise<void>;
+	reorderMod: (mod: ModInfo, direction: "up" | "down") => Promise<void>;
+	openGameFolder: () => Promise<void>;
+	openModsLibrary: () => Promise<void>;
+	openModFolder: (mod: ModInfo) => Promise<void>;
+	launchGame: () => Promise<void>;
 };
 
 export function useModManager(): ModManagerState {
@@ -63,6 +73,8 @@ export function useModManager(): ModManagerState {
 	}, [state, selectedId]);
 
 	const mods = state?.mods ?? [];
+	const applyConflicts = state?.applyConflicts ?? [];
+	const hasApplyConflicts = applyConflicts.length > 0;
 
 	const selectedMod = useMemo(() => {
 		if (!state || !selectedId) return null;
@@ -99,15 +111,25 @@ export function useModManager(): ModManagerState {
 
 	const importMods = useCallback(
 		async (paths: string[]) => {
+			if (!paths.length) return;
 			setBusy(true);
 			setError(null);
+			const imported: string[] = [];
 			try {
 				for (const archivePath of paths) {
 					await invoke("import_mod_archive", { archivePath });
+					imported.push(archivePath);
 				}
 				await refreshState();
 			} catch (err) {
-				setError(String(err));
+				const suffix =
+					imported.length > 0
+						? ` ${imported.length} archive(s) were imported before the failure.`
+						: "";
+				setError(`${String(err)}${suffix}`);
+				if (imported.length > 0) {
+					await refreshState();
+				}
 			} finally {
 				setBusy(false);
 			}
@@ -232,6 +254,42 @@ export function useModManager(): ModManagerState {
 			const report = await invoke<ApplyReport>("apply_mods");
 			setApplyReport(report);
 			setPendingChanges(false);
+			await refreshState();
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setBusy(false);
+		}
+	}, [refreshState]);
+
+	const disableAllMods = useCallback(async () => {
+		const enabledCount = mods.filter((mod) => mod.enabled).length;
+		if (!enabledCount) return;
+		setBusy(true);
+		setError(null);
+		try {
+			const nextState = await invoke<UiState>("disable_all_mods");
+			setState(nextState);
+			setPendingChanges(true);
+			setApplyReport(null);
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setBusy(false);
+		}
+	}, [mods]);
+
+	const reorderMod = useCallback(async (mod: ModInfo, direction: "up" | "down") => {
+		setBusy(true);
+		setError(null);
+		try {
+			const nextState = await invoke<UiState>("reorder_mod", {
+				id: mod.id,
+				direction,
+			});
+			setState(nextState);
+			setPendingChanges(true);
+			setApplyReport(null);
 		} catch (err) {
 			setError(String(err));
 		} finally {
@@ -239,9 +297,55 @@ export function useModManager(): ModManagerState {
 		}
 	}, []);
 
+	const openGameFolder = useCallback(async () => {
+		const path = state?.gamePath;
+		if (!path) {
+			setError("Set a valid game folder first.");
+			return;
+		}
+		try {
+			await openPath(path);
+		} catch (err) {
+			setError(String(err));
+		}
+	}, [state?.gamePath]);
+
 	const gamePathLabel = state?.gamePath ?? DEFAULT_GAME_PATH;
 	const modsPath = state?.modsPath ?? "";
 	const backupPath = state?.backupPath ?? "";
+
+	const openModsLibrary = useCallback(async () => {
+		if (!modsPath) return;
+		try {
+			await openPath(modsPath);
+		} catch (err) {
+			setError(String(err));
+		}
+	}, [modsPath]);
+
+	const openModFolder = useCallback(
+		async (mod: ModInfo) => {
+			if (!modsPath) return;
+			try {
+				await openPath(`${modsPath}/${mod.id}`);
+			} catch (err) {
+				setError(String(err));
+			}
+		},
+		[modsPath],
+	);
+
+	const launchGame = useCallback(async () => {
+		setBusy(true);
+		setError(null);
+		try {
+			await invoke("launch_game");
+		} catch (err) {
+			setError(String(err));
+		} finally {
+			setBusy(false);
+		}
+	}, []);
 
 	return {
 		state,
@@ -253,6 +357,8 @@ export function useModManager(): ModManagerState {
 		busy,
 		error,
 		applyReport,
+		applyConflicts,
+		hasApplyConflicts,
 		gamePathLabel,
 		modsPath,
 		backupPath,
@@ -265,5 +371,11 @@ export function useModManager(): ModManagerState {
 		removeMod,
 		applyMods,
 		importMods,
+		disableAllMods,
+		reorderMod,
+		openGameFolder,
+		openModsLibrary,
+		openModFolder,
+		launchGame,
 	};
 }

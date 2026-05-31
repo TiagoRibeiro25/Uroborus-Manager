@@ -11,12 +11,18 @@ export type ModInfo = {
 	source?: string | null;
 };
 
+export type ApplyConflict = {
+	file: string;
+	mods: string[];
+};
+
 export type UiState = {
 	gamePath?: string | null;
 	gamePathValid: boolean;
 	modsPath: string;
 	backupPath: string;
 	mods: ModInfo[];
+	applyConflicts: ApplyConflict[];
 };
 
 export type ApplyReport = {
@@ -33,3 +39,10 @@ export type ModConflict = {
 
 export const DEFAULT_GAME_PATH =
 	"C:\\Program Files (x86)\\Steam\\steamapps\\common\\Resident Evil 5";
+
+export const MOD_ARCHIVE_EXTENSIONS = ["zip", "7z", "rar"] as const;
+
+export function isModArchivePath(path: string): boolean {
+	const lower = path.toLowerCase();
+	return MOD_ARCHIVE_EXTENSIONS.some((ext) => lower.endsWith(`.${ext}`));
+}

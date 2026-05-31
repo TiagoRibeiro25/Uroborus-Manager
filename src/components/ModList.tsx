@@ -8,6 +8,8 @@ type ModListProps = {
 	onToggle: (mod: ModInfo) => void;
 	onRemove: (mod: ModInfo) => void;
 	onAdd: () => void;
+	onDisableAll: () => void;
+	onReorder: (mod: ModInfo, direction: "up" | "down") => void;
 };
 
 export default function ModList({
@@ -18,7 +20,10 @@ export default function ModList({
 	onToggle,
 	onRemove,
 	onAdd,
+	onDisableAll,
+	onReorder,
 }: ModListProps) {
+	const enabledCount = mods.filter((mod) => mod.enabled).length;
 	return (
 		<aside className="rounded-2xl border border-amber-400/20 bg-zinc-900/70 p-5 shadow-[0_16px_40px_rgba(0,0,0,0.4)] backdrop-blur">
 			<div className="mb-5 flex items-center justify-between">
@@ -26,18 +31,32 @@ export default function ModList({
 					<h2 className="m-0 font-['Oxanium'] text-base tracking-[0.12em]">Library</h2>
 					<p className="mt-2 text-xs text-amber-100/60">{mods.length} mods indexed</p>
 				</div>
-				<button
-					className="rounded-full bg-amber-300 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-900 transition hover:bg-amber-200"
-					onClick={onAdd}
-					disabled={busy}
-				>
-					Add Mods
-				</button>
+				<div className="flex flex-col gap-2">
+					<button
+						className="rounded-full bg-amber-300 px-4 py-2 text-[11px] font-semibold uppercase tracking-[0.2em] text-zinc-900 transition hover:bg-amber-200"
+						onClick={onAdd}
+						disabled={busy}
+					>
+						Add Mods
+					</button>
+					{enabledCount > 0 && (
+						<button
+							className="rounded-full border border-amber-300/30 px-4 py-2 text-[10px] uppercase tracking-[0.2em] text-amber-100/80 transition hover:border-amber-200/60 hover:text-amber-100"
+							onClick={onDisableAll}
+							disabled={busy}
+						>
+							Disable All
+						</button>
+					)}
+				</div>
 			</div>
+			<p className="mb-4 text-[10px] uppercase tracking-[0.2em] text-amber-100/50">
+				Enabled mods cannot share the same game files
+			</p>
 
 			<div className="space-y-3">
 				{mods.length ? (
-					mods.map((mod) => (
+					mods.map((mod, index) => (
 						<div
 							key={mod.id}
 							className={`flex w-full items-center justify-between gap-4 rounded-xl border p-4 text-left transition ${
@@ -80,24 +99,48 @@ export default function ModList({
 										aria-label={mod.enabled ? "Disable mod" : "Enable mod"}
 									>
 										<span
-											className={`absolute top-1/2 h-4 w-4 -translate-y-1/2 rounded-full transition ${
+											className={`absolute top-1/2 left-1 h-4 w-4 -translate-y-1/2 rounded-full transition ${
 												mod.enabled
-													? "translate-x-1 bg-amber-200"
-													: "-translate-x-5 bg-amber-100/60"
+													? "translate-x-7 bg-amber-200"
+													: "translate-x-0 bg-amber-100/60"
 											}`}
 										/>
 									</button>
 								</div>
-								<button
-									className="text-[10px] uppercase tracking-[0.25em] text-amber-100/60 transition hover:text-amber-100"
-									onClick={(event) => {
-										event.stopPropagation();
-										onRemove(mod);
-									}}
-									disabled={busy}
-								>
-									Remove
-								</button>
+								<div className="flex items-center gap-2">
+									<button
+										className="text-[10px] uppercase tracking-[0.25em] text-amber-100/60 transition hover:text-amber-100 disabled:opacity-30"
+										onClick={(event) => {
+											event.stopPropagation();
+											onReorder(mod, "up");
+										}}
+										disabled={busy || index === 0}
+										title="Move up (higher priority)"
+									>
+										Up
+									</button>
+									<button
+										className="text-[10px] uppercase tracking-[0.25em] text-amber-100/60 transition hover:text-amber-100 disabled:opacity-30"
+										onClick={(event) => {
+											event.stopPropagation();
+											onReorder(mod, "down");
+										}}
+										disabled={busy || index === mods.length - 1}
+										title="Move down"
+									>
+										Down
+									</button>
+									<button
+										className="text-[10px] uppercase tracking-[0.25em] text-amber-100/60 transition hover:text-amber-100"
+										onClick={(event) => {
+											event.stopPropagation();
+											onRemove(mod);
+										}}
+										disabled={busy}
+									>
+										Remove
+									</button>
+								</div>
 							</div>
 						</div>
 					))

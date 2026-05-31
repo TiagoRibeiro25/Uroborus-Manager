@@ -8,6 +8,8 @@ use std::{
 use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
 
+mod seven_zip;
+
 const DEFAULT_GAME_PATH: &str = r"C:\Program Files (x86)\Steam\steamapps\common\Resident Evil 5";
 const STATE_FILE_NAME: &str = "state.json";
 
@@ -39,12 +41,20 @@ struct AppState {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct ApplyConflict {
+    file: String,
+    mods: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct UiState {
     game_path: Option<String>,
     game_path_valid: bool,
     mods_path: String,
     backup_path: String,
     mods: Vec<ModEntry>,
+    apply_conflicts: Vec<ApplyConflict>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -68,8 +78,13 @@ struct RemovedMod {
 #[tauri::command]
 fn get_state(app: AppHandle) -> Result<UiState, String> {
     let mut state = load_state(&app)?;
-    ensure_default_paths(&app, &mut state)?;
-    save_state(&app, &state)?;
+    let mut dirty = ensure_default_paths(&app, &mut state)?;
+    if reconcile_mods(&app, &mut state)? {
+        dirty = true;
+    }
+    if dirty {
+        save_state(&app, &state)?;
+    }
     Ok(build_ui_state(&app, &state)?)
 }
 
@@ -121,7 +136,7 @@ fn set_backup_path(app: AppHandle, path: String) -> Result<UiState, String> {
 #[tauri::command]
 fn import_mod_archive(app: AppHandle, archive_path: String) -> Result<ModEntry, String> {
     let mut state = load_state(&app)?;
-    ensure_default_paths(&app, &mut state)?;
+    let _ = ensure_default_paths(&app, &mut state)?;
 
     let archive = PathBuf::from(&archive_path);
     if !archive.exists() {
@@ -132,50 +147,63 @@ fn import_mod_archive(app: AppHandle, archive_path: String) -> Result<ModEntry, 
     let temp_dir = resolve_temp_dir(&app)?;
     let mod_id = uuid::Uuid::new_v4().to_string();
     let extract_dir = temp_dir.join(&mod_id);
-    fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
-
-    extract_archive(&app, &archive, &extract_dir)?;
-
-    let native_dir = find_native_dir(&extract_dir)?;
-    let mod_root = native_dir
-        .parent()
-        .ok_or_else(|| "Could not resolve mod root.".to_string())?
-        .to_path_buf();
-
     let final_mod_dir = mods_dir.join(&mod_id);
-    if final_mod_dir.exists() {
-        fs::remove_dir_all(&final_mod_dir).map_err(|err| err.to_string())?;
-    }
-    fs::create_dir_all(&final_mod_dir).map_err(|err| err.to_string())?;
-    move_dir_contents(&mod_root, &final_mod_dir)?;
+
+    let import_result = (|| -> Result<ModEntry, String> {
+        fs::create_dir_all(&extract_dir).map_err(|err| err.to_string())?;
+        extract_archive(&app, &archive, &extract_dir)?;
+
+        let native_dir = find_native_dir(&extract_dir)?;
+        let mod_root = native_dir
+            .parent()
+            .ok_or_else(|| "Could not resolve mod root.".to_string())?
+            .to_path_buf();
+
+        if final_mod_dir.exists() {
+            fs::remove_dir_all(&final_mod_dir).map_err(|err| err.to_string())?;
+        }
+        fs::create_dir_all(&final_mod_dir).map_err(|err| err.to_string())?;
+        move_dir_contents(&mod_root, &final_mod_dir)?;
+
+        let modinfo_path = final_mod_dir.join("modinfo.ini");
+        let (name, author, version, description) = parse_modinfo(&modinfo_path, &archive);
+
+        let screenshot_path = final_mod_dir.join("screenshot.png");
+        let screenshot = if screenshot_path.exists() {
+            Some(screenshot_path.to_string_lossy().to_string())
+        } else {
+            None
+        };
+
+        let files = list_mod_files(&final_mod_dir.join("nativePC_MT"))?;
+        let replaces = compute_replacements(state.game_path.as_deref(), &files)?;
+
+        Ok(ModEntry {
+            id: mod_id.clone(),
+            name,
+            version,
+            author,
+            description,
+            enabled: false,
+            files,
+            replaces,
+            screenshot,
+            source: Some(archive_path),
+        })
+    })();
+
     if extract_dir.exists() {
         fs::remove_dir_all(&extract_dir).ok();
     }
 
-    let modinfo_path = final_mod_dir.join("modinfo.ini");
-    let (name, author, version, description) = parse_modinfo(&modinfo_path, &archive);
-
-    let screenshot_path = final_mod_dir.join("screenshot.png");
-    let screenshot = if screenshot_path.exists() {
-        Some(screenshot_path.to_string_lossy().to_string())
-    } else {
-        None
-    };
-
-    let files = list_mod_files(&final_mod_dir.join("nativePC_MT"))?;
-    let replaces = compute_replacements(state.game_path.as_deref(), &files)?;
-
-    let mod_entry = ModEntry {
-        id: mod_id,
-        name,
-        version,
-        author,
-        description,
-        enabled: false,
-        files,
-        replaces,
-        screenshot,
-        source: Some(archive_path),
+    let mod_entry = match import_result {
+        Ok(entry) => entry,
+        Err(err) => {
+            if final_mod_dir.exists() {
+                fs::remove_dir_all(&final_mod_dir).ok();
+            }
+            return Err(err);
+        }
     };
 
     state.mods.push(mod_entry.clone());
@@ -186,9 +214,37 @@ fn import_mod_archive(app: AppHandle, archive_path: String) -> Result<ModEntry, 
 #[tauri::command]
 fn set_mod_enabled(app: AppHandle, id: String, enabled: bool) -> Result<UiState, String> {
     let mut state = load_state(&app)?;
-    if let Some(mod_entry) = state.mods.iter_mut().find(|entry| entry.id == id) {
-        mod_entry.enabled = enabled;
+    let Some(mod_entry) = state.mods.iter_mut().find(|entry| entry.id == id) else {
+        return Err(format!("Mod not found: {id}"));
+    };
+    mod_entry.enabled = enabled;
+    save_state(&app, &state)?;
+    Ok(build_ui_state(&app, &state)?)
+}
+
+#[tauri::command]
+fn disable_all_mods(app: AppHandle) -> Result<UiState, String> {
+    let mut state = load_state(&app)?;
+    for entry in &mut state.mods {
+        entry.enabled = false;
     }
+    save_state(&app, &state)?;
+    Ok(build_ui_state(&app, &state)?)
+}
+
+#[tauri::command]
+fn reorder_mod(app: AppHandle, id: String, direction: String) -> Result<UiState, String> {
+    let mut state = load_state(&app)?;
+    let len = state.mods.len();
+    let Some(index) = state.mods.iter().position(|entry| entry.id == id) else {
+        return Err(format!("Mod not found: {id}"));
+    };
+    let new_index = match direction.as_str() {
+        "up" if index > 0 => index - 1,
+        "down" if index + 1 < len => index + 1,
+        _ => return Ok(build_ui_state(&app, &state)?),
+    };
+    state.mods.swap(index, new_index);
     save_state(&app, &state)?;
     Ok(build_ui_state(&app, &state)?)
 }
@@ -199,14 +255,16 @@ fn remove_mod(app: AppHandle, id: String) -> Result<UiState, String> {
     let mods_dir = resolve_mods_dir(&app, &state)?;
     if let Some(index) = state.mods.iter().position(|entry| entry.id == id) {
         let removed = state.mods.remove(index);
-        // Already disabled + applied mods had their files restored; don't queue again.
-        if removed.enabled {
+        // Queue restore on next Apply so files left in the game (e.g. disabled but not re-applied) are cleaned up.
+        if !removed.files.is_empty() {
             state.pending_removals.push(RemovedMod {
                 id: removed.id,
                 files: removed.files,
                 replaces: removed.replaces,
             });
         }
+    } else {
+        return Err(format!("Mod not found: {id}"));
     }
     let mod_dir = mods_dir.join(&id);
     if mod_dir.exists() {
@@ -217,9 +275,32 @@ fn remove_mod(app: AppHandle, id: String) -> Result<UiState, String> {
 }
 
 #[tauri::command]
+fn launch_game(app: AppHandle) -> Result<(), String> {
+    let state = load_state(&app)?;
+    let game_path = state
+        .game_path
+        .ok_or_else(|| "Game path is not set.".to_string())?;
+    let game_dir = PathBuf::from(&game_path);
+    if !is_valid_game_path(&game_dir) {
+        return Err("Game path is not valid.".to_string());
+    }
+    let exe = game_dir.join("re5dx9.exe");
+    std::process::Command::new(&exe)
+        .current_dir(&game_dir)
+        .spawn()
+        .map_err(|err| format!("Failed to launch game: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
     let mut state = load_state(&app)?;
     refresh_replacements(&mut state)?;
+
+    let conflicts = collect_apply_conflicts(&state);
+    if !conflicts.is_empty() {
+        return Err(format_apply_conflict_error(&conflicts));
+    }
 
     let game_path = state
         .game_path
@@ -271,7 +352,7 @@ fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
         if enabled_files.contains(rel) {
             continue;
         }
-        let game_file = join_rel(&native_pc, rel);
+        let game_file = join_rel(&native_pc, rel)?;
         let expects_vanilla = inactive_file_expects_vanilla(&state, rel);
 
         if let Some(backup_file) = find_backup_file(&backup_dir, rel) {
@@ -294,28 +375,38 @@ fn apply_mods(app: AppHandle) -> Result<ApplyReport, String> {
     }
 
     let mut files_written = 0usize;
+    let mut written_rels: Vec<String> = Vec::new();
     for entry in &enabled_mods {
         let mod_root = mods_dir.join(&entry.id).join("nativePC_MT");
         for rel in &entry.files {
-            let mod_file = join_rel(&mod_root, rel);
+            let mod_file = join_rel(&mod_root, rel)?;
             if !mod_file.is_file() {
+                rollback_writes(&native_pc, &backup_dir, &written_rels)?;
                 return Err(format!("Mod file missing: {rel}"));
             }
-            let game_file = join_rel(&native_pc, rel);
-            let backup_file = join_rel(&backup_native, rel);
+            let game_file = join_rel(&native_pc, rel)?;
+            let backup_file = join_rel(&backup_native, rel)?;
 
             // Backup vanilla before the first mod overwrites this path.
             if !backup_file.exists() {
                 if game_file.exists() {
                     copy_file(&game_file, &backup_file)?;
                 } else if entry.replaces.contains(rel) {
+                    rollback_writes(&native_pc, &backup_dir, &written_rels)?;
                     return Err(format!(
                         "Game file missing for \"{rel}\". Verify your game path is correct."
                     ));
                 }
             }
 
-            copy_file(&mod_file, &game_file)?;
+            if let Err(err) = copy_file(&mod_file, &game_file) {
+                rollback_writes(&native_pc, &backup_dir, &written_rels)?;
+                return Err(format!(
+                    "{err}. Rolled back {count} file(s) written during this apply.",
+                    count = written_rels.len()
+                ));
+            }
+            written_rels.push(rel.clone());
             files_written += 1;
         }
     }
@@ -343,7 +434,10 @@ pub fn run() {
             set_backup_path,
             import_mod_archive,
             set_mod_enabled,
+            disable_all_mods,
+            reorder_mod,
             remove_mod,
+            launch_game,
             apply_mods,
         ])
         .run(tauri::generate_context!())
@@ -364,23 +458,66 @@ fn build_ui_state(app: &AppHandle, state: &AppState) -> Result<UiState, String> 
         mods_path: mods_dir.to_string_lossy().to_string(),
         backup_path: backup_dir.to_string_lossy().to_string(),
         mods: state.mods.clone(),
+        apply_conflicts: collect_apply_conflicts(state),
     })
 }
 
-fn ensure_default_paths(app: &AppHandle, state: &mut AppState) -> Result<(), String> {
+fn collect_apply_conflicts(state: &AppState) -> Vec<ApplyConflict> {
+    let mut file_owners: HashMap<String, Vec<String>> = HashMap::new();
+    for entry in state.mods.iter().filter(|entry| entry.enabled) {
+        for file in &entry.files {
+            file_owners
+                .entry(file.clone())
+                .or_default()
+                .push(entry.name.clone());
+        }
+    }
+
+    let mut conflicts: Vec<ApplyConflict> = file_owners
+        .into_iter()
+        .filter(|(_, mods)| mods.len() > 1)
+        .map(|(file, mods)| ApplyConflict { file, mods })
+        .collect();
+    conflicts.sort_by(|left, right| left.file.cmp(&right.file));
+    conflicts
+}
+
+fn format_apply_conflict_error(conflicts: &[ApplyConflict]) -> String {
+    let mut message =
+        String::from("Apply blocked: enabled mods share the same game files. Reorder or disable mods to resolve conflicts.\n");
+    for conflict in conflicts.iter().take(8) {
+        message.push_str(&format!(
+            "\n• {} — {}",
+            conflict.file,
+            conflict.mods.join(" vs ")
+        ));
+    }
+    if conflicts.len() > 8 {
+        message.push_str(&format!(
+            "\n…and {} more conflict(s).",
+            conflicts.len() - 8
+        ));
+    }
+    message
+}
+
+fn ensure_default_paths(app: &AppHandle, state: &mut AppState) -> Result<bool, String> {
+    let mut changed = false;
     if state.game_path.is_none() {
         let default_path = PathBuf::from(DEFAULT_GAME_PATH);
         if is_valid_game_path(&default_path) {
             state.game_path = Some(DEFAULT_GAME_PATH.to_string());
+            changed = true;
         }
     }
 
     let mods_dir = resolve_mods_dir(app, state)?;
     if !mods_dir.exists() {
         fs::create_dir_all(&mods_dir).map_err(|err| err.to_string())?;
+        changed = true;
     }
 
-    Ok(())
+    Ok(changed)
 }
 
 fn resolve_app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
@@ -423,7 +560,17 @@ fn load_state(app: &AppHandle) -> Result<AppState, String> {
         return Ok(AppState::default());
     }
     let contents = fs::read_to_string(&path).map_err(|err| err.to_string())?;
-    serde_json::from_str(&contents).map_err(|err| err.to_string())
+    match serde_json::from_str::<AppState>(&contents) {
+        Ok(state) => Ok(state),
+        Err(parse_err) => {
+            let backup = path.with_extension("json.bak");
+            fs::copy(&path, &backup).ok();
+            Err(format!(
+                "state.json is corrupt ({parse_err}). A backup was saved to {}. Delete state.json to reset.",
+                backup.display()
+            ))
+        }
+    }
 }
 
 fn save_state(app: &AppHandle, state: &AppState) -> Result<(), String> {
@@ -439,30 +586,8 @@ fn is_valid_game_path(path: &Path) -> bool {
     path.join("re5dx9.exe").exists() && path.join("nativePC_MT").is_dir()
 }
 
-fn find_7z_path(app: &AppHandle) -> Result<PathBuf, String> {
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let candidate = resource_dir.join("bin").join("7z.exe");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join("src-tauri").join("bin").join("7z.exe");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-        let candidate = cwd.join("bin").join("7z.exe");
-        if candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-
-    Err("7z.exe was not found. Place it in src-tauri/bin/7z.exe".to_string())
-}
-
 fn extract_archive(app: &AppHandle, archive: &Path, output_dir: &Path) -> Result<(), String> {
-    let seven_zip = find_7z_path(app)?;
+    let seven_zip = seven_zip::resolve_7z_executable(app)?;
     let output = Command::new(seven_zip)
         .arg("x")
         .arg("-y")
@@ -551,10 +676,115 @@ fn list_files_in_tree(root: &Path) -> Result<Vec<String>, String> {
                 .path()
                 .strip_prefix(root)
                 .map_err(|err| err.to_string())?;
-            files.push(normalize_path(rel));
+            let rel_str = normalize_path(rel);
+            if is_safe_rel_path(&rel_str) {
+                files.push(rel_str);
+            }
         }
     }
     Ok(files)
+}
+
+fn is_safe_rel_path(rel: &str) -> bool {
+    !rel.is_empty()
+        && !rel.contains(':')
+        && !rel.starts_with('/')
+        && !rel.starts_with('\\')
+        && !rel
+            .split(['/', '\\'])
+            .any(|segment| segment == "..")
+}
+
+fn reconcile_mods(app: &AppHandle, state: &mut AppState) -> Result<bool, String> {
+    let mods_dir = resolve_mods_dir(app, state)?;
+    let mut changed = false;
+    let before = state.mods.len();
+    state.mods.retain(|entry| {
+        mods_dir
+            .join(&entry.id)
+            .join("nativePC_MT")
+            .is_dir()
+    });
+    if state.mods.len() != before {
+        changed = true;
+    }
+
+    let known: HashSet<String> = state.mods.iter().map(|entry| entry.id.clone()).collect();
+    if !mods_dir.exists() {
+        return Ok(changed);
+    }
+
+    for entry in fs::read_dir(&mods_dir).map_err(|err| err.to_string())? {
+        let entry = entry.map_err(|err| err.to_string())?;
+        if !entry.file_type().map_err(|err| err.to_string())?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if known.contains(&id) {
+            continue;
+        }
+        if let Ok(mod_entry) = rebuild_mod_from_dir(&mods_dir, &id, state.game_path.as_deref()) {
+            state.mods.push(mod_entry);
+            changed = true;
+        }
+    }
+
+    Ok(changed)
+}
+
+fn rebuild_mod_from_dir(
+    mods_dir: &Path,
+    id: &str,
+    game_path: Option<&str>,
+) -> Result<ModEntry, String> {
+    let final_mod_dir = mods_dir.join(id);
+    let native_dir = final_mod_dir.join("nativePC_MT");
+    if !native_dir.is_dir() {
+        return Err("nativePC_MT folder is missing.".to_string());
+    }
+
+    let modinfo_path = final_mod_dir.join("modinfo.ini");
+    let fallback = PathBuf::from(id);
+    let (name, author, version, description) = parse_modinfo(&modinfo_path, &fallback);
+
+    let screenshot_path = final_mod_dir.join("screenshot.png");
+    let screenshot = if screenshot_path.exists() {
+        Some(screenshot_path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    let files = list_mod_files(&native_dir)?;
+    let replaces = compute_replacements(game_path, &files)?;
+
+    Ok(ModEntry {
+        id: id.to_string(),
+        name,
+        version,
+        author,
+        description,
+        enabled: false,
+        files,
+        replaces,
+        screenshot,
+        source: None,
+    })
+}
+
+fn rollback_writes(
+    native_pc: &Path,
+    backup_dir: &Path,
+    written_rels: &[String],
+) -> Result<(), String> {
+    for rel in written_rels.iter().rev() {
+        let game_file = join_rel(native_pc, rel)?;
+        if let Some(backup) = find_backup_file(backup_dir, rel) {
+            restore_file_from_backup(&backup, &game_file)?;
+        } else if game_file.is_file() {
+            fs::remove_file(&game_file).ok();
+        }
+    }
+    Ok(())
 }
 
 fn primary_backup_native(backup_dir: &Path) -> PathBuf {
@@ -607,7 +837,7 @@ fn restore_file_from_backup(backup: &Path, game_file: &Path) -> Result<(), Strin
 
 fn find_backup_file(backup_dir: &Path, rel: &str) -> Option<PathBuf> {
     for root in backup_roots(backup_dir) {
-        let candidate = join_rel(&root, rel);
+        let candidate = join_rel(&root, rel).ok()?;
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -617,7 +847,7 @@ fn find_backup_file(backup_dir: &Path, rel: &str) -> Option<PathBuf> {
 
 fn delete_backup_for_rel(backup_dir: &Path, rel: &str) -> Result<(), String> {
     for root in backup_roots(backup_dir) {
-        let candidate = join_rel(&root, rel);
+        let candidate = join_rel(&root, rel)?;
         if candidate.is_file() {
             fs::remove_file(&candidate).map_err(|err| err.to_string())?;
             remove_empty_parents(&candidate, &root);
@@ -649,14 +879,19 @@ fn normalize_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn join_rel(base: &Path, rel: &str) -> PathBuf {
-    rel.split(['/', '\\']).fold(base.to_path_buf(), |acc, part| {
+fn join_rel(base: &Path, rel: &str) -> Result<PathBuf, String> {
+    for part in rel.split(['/', '\\']) {
+        if part == ".." {
+            return Err(format!("Invalid path in mod: \"{rel}\""));
+        }
+    }
+    Ok(rel.split(['/', '\\']).fold(base.to_path_buf(), |acc, part| {
         if part.is_empty() || part == "." {
             acc
         } else {
             acc.join(part)
         }
-    })
+    }))
 }
 
 fn compute_replacements(game_path: Option<&str>, files: &[String]) -> Result<Vec<String>, String> {
@@ -672,7 +907,7 @@ fn compute_replacements(game_path: Option<&str>, files: &[String]) -> Result<Vec
     let native_pc = game_path.join("nativePC_MT");
     let mut replaces = Vec::new();
     for rel in files {
-        let candidate = join_rel(&native_pc, rel);
+        let candidate = join_rel(&native_pc, rel)?;
         if candidate.exists() {
             replaces.push(rel.clone());
         }
