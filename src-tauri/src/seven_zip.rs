@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 #[cfg(windows)]
 const EMBEDDED_7Z: &[u8] = include_bytes!("../bin/7z.exe");
